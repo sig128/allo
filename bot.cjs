@@ -106698,7 +106698,12 @@ var PairEngine = class {
       network: this.venue?.network ?? "testnet",
       maxLeverage: this.settings.maxLeverage,
       updatedAt: new Date(this.marketsAt || Date.now()).toISOString(),
-      markets: markets.map((m) => ({ ...m, markPx: String(m.markPx) }))
+      markets: markets.map((m) => ({
+        ...m,
+        markPx: String(m.markPx),
+        prevDayPx: m.prevDayPx === void 0 ? void 0 : String(m.prevDayPx),
+        volumeUsd: m.volumeUsd === void 0 ? void 0 : Math.round(m.volumeUsd)
+      }))
     };
   }
 };
@@ -110329,7 +110334,9 @@ var HyperliquidVenue = class {
       dex: p.dex,
       group: p.dex ? dexNames.get(p.dex) ?? p.dex : "Crypto",
       maxLeverage: p.maxLeverage,
-      markPx: Number(p.ctx.markPx)
+      markPx: Number(p.ctx.markPx),
+      prevDayPx: Number(p.ctx.prevDayPx) || void 0,
+      volumeUsd: Number(p.ctx.dayNtlVlm) || 0
     }));
   }
   async perp(name) {
