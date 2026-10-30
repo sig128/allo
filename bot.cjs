@@ -105510,21 +105510,32 @@ var import_path = require("path");
 var import_web332 = __toESM(require_index_cjs(), 1);
 var ONLINE_MS = 45e3;
 var MAX_SESSIONS = 5e4;
-var PING_GAP_MS = 3e3;
+var PING_GAP_MS = 5e3;
+var MAX_LIVE_PER_IP = 50;
 var Presence = class {
   sessions = /* @__PURE__ */ new Map();
   /** UTC hour (ms / 3.6e6) → sessions seen that hour. Two days are kept. */
   hours = /* @__PURE__ */ new Map();
-  lastPing = /* @__PURE__ */ new Map();
-  /** False when the ping is malformed or comes too fast from one address. */
+  /** Address → its sessions on the site now, with when each last pinged. */
+  live = /* @__PURE__ */ new Map();
+  prunedAt = 0;
+  /** False when the ping is malformed, comes too fast from one tab, or one address has too many tabs. */
   ping(ip, body, now = Date.now()) {
-    if (now - (this.lastPing.get(ip) ?? 0) < PING_GAP_MS) return false;
+    if (now - this.prunedAt > 6e4) this.prune(now);
     const b = body ?? {};
     if (typeof b.id !== "string" || !/^[A-Za-z0-9-]{8,64}$/.test(b.id)) return false;
+    const seen = this.sessions.get(b.id);
+    if (seen && now - seen.at < PING_GAP_MS) return false;
+    let tabs = this.live.get(ip);
+    if (tabs) {
+      for (const [id, at] of tabs) if (now - at >= ONLINE_MS) tabs.delete(id);
+    }
+    if (!tabs?.has(b.id) && (tabs?.size ?? 0) >= MAX_LIVE_PER_IP) return false;
     const path = typeof b.path === "string" && b.path.startsWith("/") ? b.path.slice(0, 100) : "/";
-    if (!this.sessions.has(b.id) && this.sessions.size >= MAX_SESSIONS) this.prune(now);
-    if (!this.sessions.has(b.id) && this.sessions.size >= MAX_SESSIONS) return false;
-    this.lastPing.set(ip, now);
+    if (!seen && this.sessions.size >= MAX_SESSIONS) this.prune(now);
+    if (!seen && this.sessions.size >= MAX_SESSIONS) return false;
+    if (!tabs) this.live.set(ip, tabs = /* @__PURE__ */ new Map());
+    tabs.set(b.id, now);
     this.sessions.set(b.id, { at: now, path, wallet: b.wallet === true });
     const hour = Math.floor(now / 36e5);
     let set = this.hours.get(hour);
@@ -105533,8 +105544,12 @@ var Presence = class {
     return true;
   }
   prune(now) {
+    this.prunedAt = now;
     for (const [id, s] of this.sessions) if (now - s.at > 25 * 36e5) this.sessions.delete(id);
-    for (const [ip, at] of this.lastPing) if (now - at > 6e4) this.lastPing.delete(ip);
+    for (const [ip, tabs] of this.live) {
+      for (const [id, at] of tabs) if (now - at >= ONLINE_MS) tabs.delete(id);
+      if (tabs.size === 0) this.live.delete(ip);
+    }
     const oldest = Math.floor(now / 36e5) - 48;
     for (const hour of this.hours.keys()) if (hour < oldest) this.hours.delete(hour);
   }
