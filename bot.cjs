@@ -106163,6 +106163,9 @@ function poolId(pick) {
   return `${pick.market}|${pick.side}|${pick.leverage}`;
 }
 var sumLamports = (values) => [...values].reduce((s, v) => s + BigInt(v), 0n);
+function refusedOutright(error) {
+  return typeof error === "object" && error !== null && error.refusedOutright === true;
+}
 function prorate(total, weights) {
   const keys = Object.keys(weights).filter((k) => weights[k] > 0n);
   const all = keys.reduce((s, k) => s + weights[k], 0n);
@@ -106406,13 +106409,31 @@ var PairEngine = class {
   coinsIn(pool) {
     return Object.values(this.books.coins).filter((c) => c.pick && BigInt(c.shares) > 0n && poolId(c.pick) === pool.id);
   }
-  /** A Hyperliquid step that moves money: booked as in flight until it returns. */
+  /**
+   * A Hyperliquid step that moves money: booked as in flight until it returns, so a step that
+   * stops halfway stops the bot until someone checks. One exception: if Hyperliquid itself
+   * refused it before anything moved (an order with nothing to match, a rejected transfer),
+   * nothing is in flight and the next run simply tries again. A step with several actions calls
+   * `moved()` once its first one has gone through.
+   */
   async moving(kind, detail, step) {
     this.books.inflight = { kind, detail, at: (/* @__PURE__ */ new Date()).toISOString() };
     this.save();
-    const result = await step();
-    this.books.inflight = null;
-    return result;
+    let moved = false;
+    try {
+      const result = await step(() => {
+        moved = true;
+      });
+      this.books.inflight = null;
+      return result;
+    } catch (error) {
+      if (!moved && refusedOutright(error)) {
+        this.books.inflight = null;
+        this.save();
+        this.log("Hyperliquid refused a step, nothing moved; trying again next run", { kind, error: error.message });
+      }
+      throw error;
+    }
   }
   async progressBridge() {
     const venue = this.venue;
@@ -106460,8 +106481,9 @@ var PairEngine = class {
     if (batch.stage === "sell") {
       const before = await venue.spot();
       const credited = before.usol - batch.usolBefore;
-      await this.moving("sell", { usol: credited }, async () => {
+      await this.moving("sell", { usol: credited }, async (moved) => {
         await venue.sellUsol(credited);
+        moved();
         const after = await venue.spot();
         const usdc = after.usdc - before.usdc;
         await venue.usdcToPerp(usdc);
@@ -106613,9 +106635,10 @@ var PairEngine = class {
     const usd = dollars(sumLamports(Object.values(allocations)));
     if (usd < this.settings.minWithdrawUsd) return;
     const to = await bridge.withdrawAddress(this.chain.pairKey.toBase58());
-    await this.moving("withdraw", { usd }, async () => {
+    await this.moving("withdraw", { usd }, async (moved) => {
       const before = await venue.spot();
       await venue.usdcToSpot(usd);
+      moved();
       await venue.buyUsol(usd);
       const usol = (await venue.spot()).usol - before.usol;
       await venue.sendUsol(to, usol);
@@ -109008,6 +109031,7 @@ var ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 var SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 var UINT64_MAX2 = (1n << 64n) - 1n;
 var DEFAULT_TIMEOUT_MS = 2e4;
+var MARKETS_CONCURRENCY = 4;
 var HEX_RE = /^[0-9a-fA-F]*$/;
 var ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 function hexToBytesStrict(hex, what) {
@@ -109457,6 +109481,15 @@ var HyperliquidError = class extends Error {
     this.response = details.response;
     this.errors = details.errors ?? [];
   }
+  /**
+   * Hyperliquid answered and said no, so the request didn't run: an error in its answer (an order
+   * with nothing to match, a transfer it won't do) or a 4xx. No answer, a 5xx or an answer it
+   * can't read leave it unknown.
+   */
+  get refusedOutright() {
+    if (this.httpStatus !== void 0) return this.httpStatus >= 400 && this.httpStatus < 500;
+    return this.errors.length > 0 && this.response !== void 0;
+  }
 };
 function toJson(value) {
   if (value === null) return "null";
@@ -109485,7 +109518,19 @@ function defaultFetch() {
   if (typeof globalThis.fetch !== "function") throw new Error("no global fetch; pass options.fetch");
   return (url, init) => globalThis.fetch(url, init);
 }
-async function postJson(fetchFn, url, body, timeoutMs) {
+var RATE_LIMIT_WAITS_MS = [1e3, 2e3, 4e3, 8e3];
+async function postJson(fetchFn, url, body, timeoutMs, waits = RATE_LIMIT_WAITS_MS) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await postOnce(fetchFn, url, body, timeoutMs);
+    } catch (error) {
+      const wait = waits[attempt];
+      if (wait === void 0 || !(error instanceof HyperliquidError) || error.httpStatus !== 429) throw error;
+      await new Promise((resolve2) => setTimeout(resolve2, wait));
+    }
+  }
+}
+async function postOnce(fetchFn, url, body, timeoutMs) {
   let res;
   try {
     res = await fetchFn(url, {
@@ -109519,13 +109564,15 @@ var Info = class {
   baseUrl;
   fetchFn;
   timeoutMs;
+  rateLimitWaitsMs;
   constructor(options = {}) {
     this.baseUrl = normalizeBaseUrl(options.baseUrl ?? MAINNET_API_URL);
     this.fetchFn = options.fetch ?? defaultFetch();
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.rateLimitWaitsMs = options.rateLimitWaitsMs ?? RATE_LIMIT_WAITS_MS;
   }
   post(body) {
-    return postJson(this.fetchFn, `${this.baseUrl}/info`, body, this.timeoutMs);
+    return postJson(this.fetchFn, `${this.baseUrl}/info`, body, this.timeoutMs, this.rateLimitWaitsMs);
   }
   /** Perp metadata; `dex` "" is the main dex, otherwise a builder-deployed dex name. */
   meta(dex = "") {
@@ -109592,18 +109639,33 @@ var Markets = class _Markets {
       this.byAsset.set(p.assetId, p);
     }
   }
-  /** Fetches spotMeta, perpDexs and the meta of every dex (or just `dexs`; "" = main dex). */
+  /**
+   * Fetches spotMeta, perpDexs and the meta of every dex (or just `dexs`; "" = main dex), a few
+   * dexs at a time: one request per dex all at once opens a connection per dex, and Hyperliquid's
+   * test network has hundreds of them. Any dex failing fails the load, so a market is never
+   * missing from a list that loaded.
+   */
   static async load(info, options = {}) {
     const [spotMeta, perpDexs] = await Promise.all([info.spotMeta(), info.perpDexs()]);
     const dexs = options.dexs ?? ["", ...perpDexs.slice(1).flatMap((d) => d ? [d.name] : [])];
     const metas = {};
     const ctxs = {};
-    await Promise.all(
-      dexs.map(async (dex) => {
-        if (options.withContexts) [metas[dex], ctxs[dex]] = await info.metaAndAssetCtxs(dex);
-        else metas[dex] = await info.meta(dex);
-      })
-    );
+    const queue = [...dexs];
+    let failed = false;
+    const worker = async () => {
+      while (!failed && queue.length > 0) {
+        const dex = queue.shift();
+        try {
+          if (options.withContexts) [metas[dex], ctxs[dex]] = await info.metaAndAssetCtxs(dex);
+          else metas[dex] = await info.meta(dex);
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
+      }
+    };
+    const workers = Math.max(1, Math.min(options.concurrency ?? MARKETS_CONCURRENCY, dexs.length));
+    await Promise.all(Array.from({ length: workers }, worker));
     return _Markets.fromData({ spotMeta, perpDexs, metas, ctxs });
   }
   /** Builds from already-fetched responses (no network). */
@@ -109756,10 +109818,12 @@ var Exchange = class {
   signer;
   fetchFn;
   timeoutMs;
+  rateLimitWaitsMs;
   throwOnError;
   now;
   marketDexs;
   marketsPromise;
+  loadMarkets;
   constructor(options) {
     const key = parsePrivateKey(options.privateKey);
     this.signer = makeSigner(key);
@@ -109767,7 +109831,8 @@ var Exchange = class {
     const baseUrl = normalizeBaseUrl(options.baseUrl ?? options.info?.baseUrl ?? MAINNET_API_URL);
     this.fetchFn = options.fetch ?? options.info?.fetchFn ?? defaultFetch();
     this.timeoutMs = options.timeoutMs ?? options.info?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.info = options.info ?? new Info({ baseUrl, fetch: this.fetchFn, timeoutMs: this.timeoutMs });
+    this.rateLimitWaitsMs = options.rateLimitWaitsMs ?? options.info?.rateLimitWaitsMs ?? RATE_LIMIT_WAITS_MS;
+    this.info = options.info ?? new Info({ baseUrl, fetch: this.fetchFn, timeoutMs: this.timeoutMs, rateLimitWaitsMs: this.rateLimitWaitsMs });
     if (this.info.baseUrl !== baseUrl) throw new Error("options.info uses a different baseUrl");
     this.isMainnet = options.isMainnet ?? baseUrl === MAINNET_API_URL;
     this.vaultAddress = options.vaultAddress ? lowerAddress(options.vaultAddress, "vaultAddress") : null;
@@ -109776,13 +109841,15 @@ var Exchange = class {
     this.throwOnError = options.throwOnError ?? true;
     this.now = options.now ?? Date.now;
     this.marketDexs = options.marketDexs;
+    this.loadMarkets = options.loadMarkets;
     if (options.markets) this.marketsPromise = Promise.resolve(options.markets);
   }
   get baseUrl() {
     return this.info.baseUrl;
   }
-  /** Markets, fetched once on first use. */
+  /** Markets, fetched once on first use (or from options.loadMarkets every time). */
   markets() {
+    if (this.loadMarkets) return this.loadMarkets();
     if (!this.marketsPromise) {
       this.marketsPromise = Markets.load(this.info, { dexs: this.marketDexs });
       this.marketsPromise.catch(() => this.marketsPromise = void 0);
@@ -109791,6 +109858,7 @@ var Exchange = class {
   }
   /** Fetches markets again (new listings, new builder dexs). */
   reloadMarkets() {
+    if (this.loadMarkets) return this.loadMarkets();
     this.marketsPromise = void 0;
     return this.markets();
   }
@@ -109811,7 +109879,7 @@ var Exchange = class {
   /** Posts a signed action as the SDK's `_post_action` does. */
   async postAction(action, signature, nonce, vaultAddress, expiresAfter) {
     const payload = { action, nonce, signature, vaultAddress, expiresAfter };
-    const response = await postJson(this.fetchFn, `${this.baseUrl}/exchange`, payload, this.timeoutMs);
+    const response = await postJson(this.fetchFn, `${this.baseUrl}/exchange`, payload, this.timeoutMs, this.rateLimitWaitsMs);
     if (this.throwOnError) {
       const errors = extractErrors(response);
       if (errors.length) throw new HyperliquidError(`Hyperliquid rejected ${action.type}: ${errors.join("; ")}`, { response, errors });
@@ -110288,7 +110356,7 @@ var HyperliquidVenue = class {
     this.info = info;
     this.hlKey = hlKey;
     this.network = network;
-    this.master = new Exchange({ privateKey: hlKey, info, isMainnet: network === "mainnet" });
+    this.master = new Exchange({ privateKey: hlKey, info, isMainnet: network === "mainnet", loadMarkets: this.sharedMarkets });
     this.masterAddress = this.master.address;
   }
   info;
@@ -110298,6 +110366,9 @@ var HyperliquidVenue = class {
   master;
   pools = /* @__PURE__ */ new Map();
   cache = null;
+  loading = null;
+  /** The master and every pool trade from this one market list instead of each loading its own. */
+  sharedMarkets = async () => (await this.load()).markets;
   poolKey(id) {
     return deriveKey(this.hlKey, `allo-pair-pool:${id}`);
   }
@@ -110307,18 +110378,25 @@ var HyperliquidVenue = class {
   poolExchange(id) {
     let exchange = this.pools.get(id);
     if (!exchange) {
-      exchange = new Exchange({ privateKey: this.poolKey(id), info: this.info, isMainnet: this.network === "mainnet" });
+      exchange = new Exchange({ privateKey: this.poolKey(id), info: this.info, isMainnet: this.network === "mainnet", loadMarkets: this.sharedMarkets });
       this.pools.set(id, exchange);
     }
     return exchange;
   }
   async load() {
-    if (!this.cache || Date.now() - this.cache.at > MARKETS_TTL_MS) {
-      const [markets, dexs] = await Promise.all([Markets.load(this.info, { withContexts: true }), this.info.perpDexs()]);
-      const dexNames = new Map(dexs.filter((d) => d !== null).map((d) => [d.name, d.fullName || d.name]));
-      this.cache = { markets, dexNames, at: Date.now() };
-    }
-    return this.cache;
+    if (this.cache && Date.now() - this.cache.at <= MARKETS_TTL_MS) return this.cache;
+    this.loading ??= (async () => {
+      try {
+        const dexs = this.network === "mainnet" ? void 0 : [""];
+        const [markets, list] = await Promise.all([Markets.load(this.info, { withContexts: true, dexs }), this.info.perpDexs()]);
+        const dexNames = new Map(list.filter((d) => d !== null).map((d) => [d.name, d.fullName || d.name]));
+        this.cache = { markets, dexNames, at: Date.now() };
+        return this.cache;
+      } finally {
+        this.loading = null;
+      }
+    })();
+    return this.loading;
   }
   /** A perp the bot can run: listed, priced, and margined in USDC (builder markets can use other collateral). */
   usable(p) {
