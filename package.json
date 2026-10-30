@@ -1,0 +1,11 @@
+{
+  "name": "allo-bot",
+  "private": true,
+  "description": "allo's payout bot: every hour it pays $ALLO stakers their share of every launch, and serves their drops to allo.cash",
+  "scripts": {
+    "start": "node --no-deprecation bot.cjs serve"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
