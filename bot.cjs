@@ -105979,14 +105979,15 @@ var SolanaChain = class {
 // src/autoclaim.ts
 async function autoClaim(args) {
   const programId = args.programId ?? ALLO_VAULT_PROGRAM_ID;
+  const everyone = args.minStake <= 0n;
   const eligible = new Set(args.stakes.filter((s) => s.amount >= args.minStake).map((s) => s.owner.toBase58()));
-  if (eligible.size === 0) return 0;
+  if (!everyone && eligible.size === 0) return 0;
   const candidates = [];
   for (const state of args.states) {
     const tokenProgram = args.tokenPrograms.get(state.mint);
     if (!tokenProgram) continue;
     const tree = args.trees.get(state);
-    for (const owner of eligible) {
+    for (const owner of everyone ? Object.keys(state.cumulative) : eligible) {
       const amount = BigInt(state.cumulative[owner] ?? "0");
       const position = tree.index.get(owner);
       if (amount > 0n && position !== void 0) {
