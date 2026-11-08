@@ -23916,7 +23916,7 @@ Missing signature for public key${sigErrors.missing.length === 1 ? "" : "(s)"} [
     var MS_PER_SLOT = 1e3 / NUM_SLOTS_PER_SECOND;
     var SYSVAR_CLOCK_PUBKEY2 = new PublicKey41("SysvarC1ock11111111111111111111111111111111");
     var SYSVAR_EPOCH_SCHEDULE_PUBKEY = new PublicKey41("SysvarEpochSchedu1e111111111111111111111111");
-    var SYSVAR_INSTRUCTIONS_PUBKEY5 = new PublicKey41("Sysvar1nstructions1111111111111111111111111");
+    var SYSVAR_INSTRUCTIONS_PUBKEY6 = new PublicKey41("Sysvar1nstructions1111111111111111111111111");
     var SYSVAR_RECENT_BLOCKHASHES_PUBKEY = new PublicKey41("SysvarRecentB1ockHashes11111111111111111111");
     var SYSVAR_RENT_PUBKEY5 = new PublicKey41("SysvarRent111111111111111111111111111111111");
     var SYSVAR_REWARDS_PUBKEY = new PublicKey41("SysvarRewards111111111111111111111111111111");
@@ -31254,7 +31254,7 @@ Message: ${transactionMessage}.
     exports2.SYSTEM_INSTRUCTION_LAYOUTS = SYSTEM_INSTRUCTION_LAYOUTS;
     exports2.SYSVAR_CLOCK_PUBKEY = SYSVAR_CLOCK_PUBKEY2;
     exports2.SYSVAR_EPOCH_SCHEDULE_PUBKEY = SYSVAR_EPOCH_SCHEDULE_PUBKEY;
-    exports2.SYSVAR_INSTRUCTIONS_PUBKEY = SYSVAR_INSTRUCTIONS_PUBKEY5;
+    exports2.SYSVAR_INSTRUCTIONS_PUBKEY = SYSVAR_INSTRUCTIONS_PUBKEY6;
     exports2.SYSVAR_RECENT_BLOCKHASHES_PUBKEY = SYSVAR_RECENT_BLOCKHASHES_PUBKEY;
     exports2.SYSVAR_RENT_PUBKEY = SYSVAR_RENT_PUBKEY5;
     exports2.SYSVAR_REWARDS_PUBKEY = SYSVAR_REWARDS_PUBKEY;
@@ -31333,7 +31333,7 @@ var require_bindings = __commonJS({
     var fs = require("fs");
     var path = require("path");
     var fileURLToPath = require_file_uri_to_path();
-    var join8 = path.join;
+    var join9 = path.join;
     var dirname = path.dirname;
     var exists = fs.accessSync && function(path2) {
       try {
@@ -31393,7 +31393,7 @@ var require_bindings = __commonJS({
       var requireFunc = typeof __webpack_require__ === "function" ? __non_webpack_require__ : require;
       var tries = [], i = 0, l2 = opts.try.length, n, b2, err;
       for (; i < l2; i++) {
-        n = join8.apply(
+        n = join9.apply(
           null,
           opts.try[i].map(function(p2) {
             return opts[p2] || p2;
@@ -31454,7 +31454,7 @@ var require_bindings = __commonJS({
         if (dir === ".") {
           dir = process.cwd();
         }
-        if (exists(join8(dir, "package.json")) || exists(join8(dir, "node_modules"))) {
+        if (exists(join9(dir, "package.json")) || exists(join9(dir, "node_modules"))) {
           return dir;
         }
         if (prev === dir) {
@@ -31463,7 +31463,7 @@ var require_bindings = __commonJS({
           );
         }
         prev = dir;
-        dir = join8(dir, "..");
+        dir = join9(dir, "..");
       }
     };
   }
@@ -78325,7 +78325,9 @@ var NAME_TICKERS = REAL_ASSET_TICKERS.filter((t) => !["DAI", "KAU", "KAG", "IAU"
 
 // ../sdk/src/constants.ts
 var import_web3 = __toESM(require_index_cjs(), 1);
-var ALLO_VAULT_PROGRAM_ID = new import_web3.PublicKey("5Ek1ScFCSVEoWEERGwU96Kv8HrNEpB5vBxzix85YYrb9");
+var ALLO_VAULT_PROGRAM_ID = new import_web3.PublicKey("7NmEQXhcA2wULS2EzmU2MikWhdbTsZ4MfRuDW55QaLLo");
+var LEGACY_ALLO_VAULT_PROGRAM_ID = new import_web3.PublicKey("5Ek1ScFCSVEoWEERGwU96Kv8HrNEpB5vBxzix85YYrb9");
+var LEGACY_ALLO_MINT = new import_web3.PublicKey("13Fr7NAVWSCAjjd1fDsZC1MfJpPvpRoLwrhaWXWoaLLo");
 var DBC_PROGRAM_ID = new import_web3.PublicKey("dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN");
 var BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new import_web3.PublicKey(
   "BPFLoaderUpgradeab1e11111111111111111111111"
@@ -120300,7 +120302,8 @@ var MAINNET_RENT_PER_BYTE = 5080n;
 function poolRentLamports(binArrays, lamportsPerByte = MAINNET_RENT_PER_BYTE) {
   return (POOL_BASE_RENT_BYTES + BigInt(binArrays) * BIN_ARRAY_RENT_BYTES) * lamportsPerByte + POOL_FEES_LAMPORTS;
 }
-var POOL_RENT_LAMPORTS = poolRentLamports(2);
+var TYPICAL_BIN_ARRAYS = 2;
+var POOL_RENT_LAMPORTS = poolRentLamports(TYPICAL_BIN_ARRAYS);
 var PUMP_LAUNCH_SIZE = 8 + 32 + 32 + 8 + 8 + 16 + 32 + 32 + 4 + 4 + 4 + 8 + 8 + 1;
 async function fetchPumpLaunches(connection, programId = ALLO_VAULT_PROGRAM_ID) {
   const accounts = await connection.getProgramAccounts(programId, { commitment: "confirmed", filters: [{ dataSize: PUMP_LAUNCH_SIZE }] });
@@ -120330,6 +120333,11 @@ function divQ64(a2, b2) {
 }
 function curvePriceQ64(virtualQuoteReserves, virtualTokenReserves) {
   return divQ64(virtualQuoteReserves, virtualTokenReserves);
+}
+function isAlloPricePool(info, alloMint) {
+  if (!info || !info.owner.equals(DAMM_V2_PROGRAM_ID) || info.data.length < 1112) return false;
+  const data = import_buffer6.Buffer.from(info.data);
+  return new import_web334.PublicKey(data.subarray(168, 200)).equals(alloMint) && new import_web334.PublicKey(data.subarray(200, 232)).equals(NATIVE_MINT) && new Reader(data).skip(456).u128() > 0n;
 }
 function alloPriceQ64FromPool(data) {
   const sqrt3 = new Reader(import_buffer6.Buffer.from(data)).skip(456).u128();
@@ -146157,13 +146165,17 @@ function expandHome(path) {
   return path.startsWith("~/") ? (0, import_path2.resolve)((0, import_os.homedir)(), path.slice(2)) : (0, import_path2.resolve)(path);
 }
 function loadConfig(env = process.env) {
+  const programId = env.ALLO_PROGRAM_ID ? new import_web355.PublicKey(env.ALLO_PROGRAM_ID) : ALLO_VAULT_PROGRAM_ID;
+  const state = expandHome(env.STATE_DIR ?? "./state");
   return {
     rpcUrl: env.RPC_URL ?? "http://127.0.0.1:8899",
     keypairPath: expandHome(env.DISTRIBUTOR_KEYPAIR ?? "~/.config/solana/id.json"),
-    stateDir: expandHome(env.STATE_DIR ?? "./state"),
+    // Each contract keeps its own memory: a new contract starts from nothing, and what the
+    // bot recorded for the contract before it stays untouched where it always was.
+    stateDir: programId.equals(LEGACY_ALLO_VAULT_PROGRAM_ID) ? state : (0, import_path2.join)(state, programId.toBase58()),
     intervalSeconds: Number(env.INTERVAL_SECONDS ?? 3600),
     port: Number(env.PORT ?? 8787),
-    programId: env.ALLO_PROGRAM_ID ? new import_web355.PublicKey(env.ALLO_PROGRAM_ID) : ALLO_VAULT_PROGRAM_ID,
+    programId,
     autoClaimMinStake: env.AUTO_CLAIM_MIN_STAKE ? BigInt(env.AUTO_CLAIM_MIN_STAKE) : void 0,
     maxAutoClaimsPerRun: Number(env.MAX_AUTO_CLAIMS_PER_RUN ?? 50),
     priorityMicroLamports: env.PRIORITY_MICRO_LAMPORTS ? Number(env.PRIORITY_MICRO_LAMPORTS) : void 0,
@@ -151736,10 +151748,17 @@ function impactBps(out, amount, probeOut, probe) {
   const ratio = out * probe * 10000n / (probeOut * amount);
   return Math.max(0, 1e4 - Number(ratio));
 }
+function probeSize(amount, fromSol) {
+  const floor2 = fromSol ? PRICE_PROBE_LAMPORTS : 1000000n;
+  if (amount < floor2) return amount;
+  if (fromSol) return floor2;
+  return amount / 100n > floor2 ? amount / 100n : floor2;
+}
 var DEFAULT_CONVERSION_SETTINGS = {
   maxImpactBps: 100,
   slippageBps: 50,
-  minConvertLamports: 10000000n,
+  // As DEFAULT_STREAM_SETTINGS: at 1% a swap, a pool of half a SOL takes swaps of 0.005 SOL.
+  minConvertLamports: 5000000n,
   minConvertVia: 1000000n
 };
 var CONVERT_COMPUTE_UNITS = 4e5;
@@ -151948,7 +151967,7 @@ var SolanaStreamChain = class {
     const accounts = await route.accounts();
     const min2 = from === SOL_MINT ? this.settings.minConvertLamports : this.settings.minConvertVia ?? 1000000n;
     let amount = amountIn;
-    const probe = amount < 1000000n ? amount : amount / 100n > 1000000n ? amount / 100n : 1000000n;
+    const probe = probeSize(amount, from === SOL_MINT);
     const probeOut = await this.simulate(route, accounts, probe);
     if (!probeOut) return null;
     let out = null;
@@ -152110,6 +152129,7 @@ var Keeper = class {
   async seed(settings, only) {
     const report = { seeded: [], harvested: [], feesSplit: [], stuck: [], failed: [] };
     if (!settings.keeper.equals(this.keeper.publicKey)) return report;
+    if (!await this.alloReady(settings)) return { ...report, waiting: true };
     const launches = (await fetchPumpLaunches(this.connection, this.programId)).filter(
       ({ launch }) => launch.seededAt === 0n && (!only || launch.mint.equals(only))
     );
@@ -152124,6 +152144,15 @@ var Keeper = class {
       }
     }
     return report;
+  }
+  /**
+   * Whether allo's settings name $ALLO and its own pool, both on chain: a coin's pool is the coin
+   * against ALLO, priced from ALLO's pool. Before $ALLO is out they name a placeholder.
+   */
+  async alloReady(settings) {
+    const [mint, pool] = await this.connection.getMultipleAccountsInfo([settings.alloMint, settings.alloPricePool], "confirmed");
+    const isMint = !!mint && (mint.owner.equals(TOKEN_PROGRAM_ID) || mint.owner.equals(TOKEN_2022_PROGRAM_ID));
+    return isMint && isAlloPricePool(pool, settings.alloMint);
   }
   /** False when the coin can't be seeded: its curve completed before allo got to it. */
   async seedOne(launch, settings) {
@@ -152449,7 +152478,9 @@ async function pushStreamPayouts(args) {
 // src/v2/run.ts
 var import_buffer15 = require("buffer");
 var DEFAULT_STREAM_SETTINGS = {
-  minConvertLamports: 10000000n,
+  // A swap moves a pool by about its share of the pool's SOL, so at 1% a swap a pool needs 100
+  // times this to take one: 0.005 SOL lets a young ALLO's pool of half a SOL take payouts.
+  minConvertLamports: 5000000n,
   minConvertVia: 1000000n,
   maxSwapsPerTarget: 2,
   pendingGraceMs: 3 * 6e4,
@@ -152764,7 +152795,7 @@ var V2Bot = class {
   seenLaunchCount = null;
   seedOwed = false;
   upkeeping = false;
-  status = { streams: null, streamsError: null, keeper: null, keeperError: null, upkeep: null, pushed: 0 };
+  status = { streams: null, streamsError: null, keeper: null, keeperError: null, keeperWaiting: false, upkeep: null, pushed: 0 };
   /** Keeps coin addresses ready once launches on pump.fun are live. */
   async keepMints() {
     if (!await this.settings()) return;
@@ -152840,9 +152871,14 @@ var V2Bot = class {
     this.seeding = true;
     try {
       const report = await this.keeper.seed(settings, only);
+      const waiting = report.waiting === true;
+      if (waiting !== this.status.keeperWaiting) {
+        this.log(waiting ? "seeding waits for $ALLO and its pool; new coins keep their slice in allo\u2019s vault" : "$ALLO and its pool are named: seeding every coin waiting for its pool");
+        this.status.keeperWaiting = waiting;
+      }
       if (!only) {
         this.seenLaunchCount = settings.launchCount;
-        this.seedOwed = report.failed.length > 0;
+        this.seedOwed = report.failed.length > 0 || waiting;
       }
       if (report.seeded.length || report.failed.length || report.stuck.length) this.status.keeper = report;
       this.status.keeperError = null;

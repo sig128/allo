@@ -17,6 +17,11 @@ One always-on service with three jobs:
   claims their fees, sends allo's half to the deploy key, runs the rest as each coin's position on
   Hyperliquid, and buys back and burns the coin with the profit.
 
+It runs allo's contract, `7NmEQXhcA2wULS2EzmU2MikWhdbTsZ4MfRuDW55QaLLo`, and keeps that
+contract's memory in its own folder on the disk, so nothing recorded before is touched. Until
+$ALLO and its own pool are out, launches still go through: each coin's slice for stakers waits in
+allo's vault, and the bot seeds its pool as soon as allo's settings name $ALLO and its pool.
+
 Run **exactly one** copy, and never delete its disk: the disk is its memory of what it has paid
 and what each coin owns. A fresh copy refuses to pay coins it doesn't recognise rather than pay
 anything twice.
@@ -49,6 +54,8 @@ fees), and **0.05 SOL** for the pair bot's Solana key.
 - `PAIR_TREASURY`: where allo's half of paired coins' fees goes. Defaults to the deploy key.
 - `CONVERT_SWAPS_PER_RUN` (default 2), `CONVERT_MAX_IMPACT_BPS` (default 100): how many buys of a
   payout token each run makes, and how far each may move its price (100 = 1%).
+- `CONVERT_MIN_LAMPORTS` (default 5000000, 0.005 SOL): the smallest buy of a payout token. At 1%
+  a buy, a pool needs about 100 times this in SOL to take one.
 - `CONVERT_MAX_PREMIUM_BPS` (default 1000): the bot doesn't buy a payout token while it costs more
   than this above its median price over the last six runs (1000 = 10%).
 - `CONVERT_STALL_HOURS` (default 24): SOL that has waited this long to be bought into a token is
