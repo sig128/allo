@@ -7,7 +7,8 @@ One always-on service with three jobs:
 - **Launches on pump.fun** (once allo v2 is set up with `./pump-setup.sh`; until then it waits).
   It opens and seeds each new coin's stakers' pool within seconds of launch, harvests the pools
   and splits creator fees hourly, buys each staker's chosen payout token ($ALLO, $ALLO into their
-  stake, or USDC) a small slice at a time, and pays everyone without them signing anything. It
+  stake, USDC, or gold, which it buys through USDC) a small slice at a time, and pays everyone
+  without them signing anything. It
   also keeps a stock of coin addresses ending in `aLLo` ready for the launch page.
 - **stALLO** (once it's turned on with `./pump-setup.sh stallo`). stALLO's pooled stake is paid
   like a staker who chose $ALLO into their stake: its share is always bought into $ALLO and put

@@ -120675,6 +120675,9 @@ var SEED_CONVERSION_ROUTES = "conversion_routes";
 var SEED_WSOL_BUFFER = "wsol_buffer";
 var MAX_CONVERSION_ROUTES = 8;
 var ROUTE_KIND = { none: 0, dammV2: 1, dlmm: 2 };
+var USDC_MINT2 = new import_web336.PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+var GOLD_MINT = new import_web336.PublicKey("GoLDppdjB1vDTPSGxyMJFqdnj134yH6Prg9eqsGDiw6A");
+var GOLD_USDC_POOL = new import_web336.PublicKey("3Vj8miZuTSdonf4W1xLdYFatrXLm38CShrCi7NbZS5Ah");
 var IX2 = {
   setPayoutChoice: [125, 217, 83, 209, 78, 181, 180, 17],
   initConversions: [192, 229, 86, 107, 220, 42, 80, 124],
@@ -151470,7 +151473,7 @@ var import_fs5 = require("fs");
 var import_path5 = require("path");
 var import_web362 = __toESM(require_index_cjs(), 1);
 function emptyBook() {
-  return { streams: {}, queue: {}, inFlight: null, rates: {}, seenSlot: 0, waitingSince: {}, prices: {} };
+  return { streams: {}, queue: {}, inFlight: null, rates: {}, seenSlot: 0, waitingSince: {}, prices: {}, via: {} };
 }
 function emptyStream(mint, stream) {
   return { mint, stream, epoch: 0, allocated: "0", cumulative: {}, credits: {} };
@@ -151566,6 +151569,14 @@ function routeShares(shares, choices, targets, alwaysQueued = /* @__PURE__ */ ne
   }
   return { direct, queued };
 }
+function viaHeld(book, mint) {
+  let total = 0n;
+  for (const v2 of Object.values(book.via)) if (v2.mint === mint) total += sumAmounts(Object.values(v2.owed));
+  return total;
+}
+function viaWaiting(book, target) {
+  return sumAmounts(Object.values(book.via[target]?.owed ?? {}));
+}
 function queuedTotal(book) {
   let total = 0n;
   for (const owed of Object.values(book.queue)) total += sumAmounts(Object.values(owed));
@@ -151584,26 +151595,62 @@ function planSpends(book, target, amountIn) {
   if (amountIn <= 0n || amountIn > total) throw new Error(`Can't spend ${amountIn} of the ${total} waiting for ${target}`);
   return splitProRata(amountIn, waiting);
 }
+function planViaSpends(book, target, amountIn) {
+  const waiting = toAmounts(book.via[target]?.owed);
+  const total = sumAmounts(waiting.values());
+  if (amountIn <= 0n || amountIn > total) throw new Error(`Can't spend ${amountIn} of the ${total} waiting on the way to ${target}`);
+  return splitProRata(amountIn, waiting);
+}
+function spend(owed, spends) {
+  const left = new Map(owed);
+  for (const [owner, spent] of spends) {
+    const rest = (left.get(owner) ?? 0n) - spent;
+    if (rest < 0n) throw new Error(`The swap spent more than ${owner} was owed`);
+    if (rest === 0n) left.delete(owner);
+    else left.set(owner, rest);
+  }
+  return left;
+}
 function applyConversion(book, out) {
   const flight = book.inFlight;
   if (!flight) throw new Error("No swap in flight");
   const spends = toAmounts(flight.spends);
-  const waiting = toAmounts(book.queue[flight.target]);
-  for (const [owner, spent] of spends) {
-    const left = (waiting.get(owner) ?? 0n) - spent;
-    if (left < 0n) throw new Error(`The swap spent more than ${owner} was owed`);
-    if (left === 0n) waiting.delete(owner);
-    else waiting.set(owner, left);
+  const from = flight.from ?? SOL_MINT;
+  const buys = flight.buys ?? flight.target;
+  const bought = splitProRata(out, spends);
+  let next = { ...book, inFlight: null };
+  if (from === SOL_MINT) {
+    const waiting = spend(toAmounts(book.queue[flight.target]), spends);
+    const queue = { ...book.queue };
+    if (waiting.size) queue[flight.target] = toRecord(waiting);
+    else delete queue[flight.target];
+    next = { ...next, queue };
+  } else {
+    const held = book.via[flight.target];
+    if (!held || held.mint !== from) throw new Error(`Nothing waits in ${from} for ${flight.target}`);
+    const waiting = spend(toAmounts(held.owed), spends);
+    const via = { ...book.via };
+    if (waiting.size) via[flight.target] = { mint: from, owed: toRecord(waiting) };
+    else delete via[flight.target];
+    next = { ...next, via };
   }
-  const queue = { ...book.queue };
-  if (waiting.size) queue[flight.target] = toRecord(waiting);
-  else delete queue[flight.target];
-  const stream = book.streams[flight.target];
-  if (!stream) throw new Error(`No book for ${flight.target}`);
-  const credits = toRecord(merge(toAmounts(stream.credits), splitProRata(out, spends)));
+  if (buys === flight.target) {
+    const stream = book.streams[flight.target];
+    if (!stream) throw new Error(`No book for ${flight.target}`);
+    const credits = toRecord(merge(toAmounts(stream.credits), bought));
+    next = { ...next, streams: { ...next.streams, [flight.target]: { ...stream, credits } } };
+  } else {
+    const held = next.via[flight.target];
+    if (held && held.mint !== buys) throw new Error(`${flight.target} is already waiting in ${held.mint}, not ${buys}`);
+    const owed = toRecord(merge(toAmounts(held?.owed), bought));
+    next = { ...next, via: { ...next.via, [flight.target]: { mint: buys, owed } } };
+  }
   const rates = { ...book.rates };
-  if (out > 0n) rates[flight.target] = ((BigInt(flight.amountIn) << 64n) / out).toString();
-  return { ...book, queue, inFlight: null, rates, streams: { ...book.streams, [flight.target]: { ...stream, credits } } };
+  if (out > 0n) {
+    if (from === SOL_MINT) rates[buys] = ((BigInt(flight.amountIn) << 64n) / out).toString();
+    else if (book.rates[from]) rates[buys] = (BigInt(book.rates[from]) * BigInt(flight.amountIn) / out).toString();
+  }
+  return { ...next, rates };
 }
 function advanceStream(stream, add4) {
   let added = 0n;
@@ -151626,8 +151673,10 @@ function streamAdditions(stream, newShares) {
 }
 function ageQueues(book, now) {
   const waitingSince = {};
-  for (const [target, owed] of Object.entries(book.queue)) {
-    if (sumAmounts(Object.values(owed)) > 0n) waitingSince[target] = book.waitingSince[target] ?? now;
+  for (const target of /* @__PURE__ */ new Set([...Object.keys(book.queue), ...Object.keys(book.via)])) {
+    if (sumAmounts(Object.values(book.queue[target] ?? {})) > 0n || viaWaiting(book, target) > 0n) {
+      waitingSince[target] = book.waitingSince[target] ?? now;
+    }
   }
   return { ...book, waitingSince };
 }
@@ -151690,10 +151739,12 @@ function impactBps(out, amount, probeOut, probe) {
 var DEFAULT_CONVERSION_SETTINGS = {
   maxImpactBps: 100,
   slippageBps: 50,
-  minConvertLamports: 10000000n
+  minConvertLamports: 10000000n,
+  minConvertVia: 1000000n
 };
 var CONVERT_COMPUTE_UNITS = 4e5;
 var PRICE_PROBE_LAMPORTS = 1000000n;
+var PRICE_PROBE_VIA = 1000000n;
 var sleep = (ms) => new Promise((resolve2) => setTimeout(resolve2, ms));
 var SolanaStreamChain = class {
   constructor(connection, distributor, programId = ALLO_VAULT_PROGRAM_ID, settings = DEFAULT_CONVERSION_SETTINGS, priorityMicroLamports) {
@@ -151708,7 +151759,10 @@ var SolanaStreamChain = class {
   programId;
   settings;
   priorityMicroLamports;
+  /** Target → its pool against SOL. */
   routes = /* @__PURE__ */ new Map();
+  /** Target → its pool against a token SOL buys, for a target SOL can't buy directly. */
+  viaRoutes = /* @__PURE__ */ new Map();
   rentReserve;
   /** Signed swaps waiting to be sent, by signature. */
   signed = /* @__PURE__ */ new Map();
@@ -151752,22 +151806,46 @@ var SolanaStreamChain = class {
     const choices = await fetchPayoutChoices(this.connection, this.programId);
     return new Map(choices.map((c) => [c.owner.toBase58(), { mint: c.mint.toBase58(), stake: c.stake }]));
   }
-  /** Every token an approved pool trades against SOL. The first pool approved for a token is used. */
+  /**
+   * Every token an approved pool trades against SOL, and every token an approved pool trades
+   * against one of those (bought through it, in two swaps). The first pool approved for a
+   * token is used, and a token SOL can buy directly is always bought directly.
+   */
   async targets() {
     const routes = await fetchConversionRoutes(this.connection, this.programId) ?? [];
-    const next = /* @__PURE__ */ new Map();
+    const direct = /* @__PURE__ */ new Map();
+    const via = /* @__PURE__ */ new Map();
     const pools = routes.length ? await this.connection.getMultipleAccountsInfo(routes.map((r) => r.pool), "confirmed") : [];
+    const build = async (pool, kind, data, input) => kind === ROUTE_KIND.dammV2 ? this.dammRoute(pool, data, input) : kind === ROUTE_KIND.dlmm ? this.dlmmRoute(pool, data, input) : null;
     for (const [i, route] of routes.entries()) {
       const info = pools[i];
       if (!info) continue;
       try {
-        const built = route.kind === ROUTE_KIND.dammV2 ? await this.dammRoute(route.pool, info.data) : route.kind === ROUTE_KIND.dlmm ? await this.dlmmRoute(route.pool, info.data) : null;
-        if (built && !next.has(built.target.toBase58())) next.set(built.target.toBase58(), built);
+        const built = await build(route.pool, route.kind, info.data, (a2, b2) => a2.equals(NATIVE_MINT) ? a2 : b2.equals(NATIVE_MINT) ? b2 : null);
+        if (built && !direct.has(built.target.toBase58())) direct.set(built.target.toBase58(), built);
       } catch {
       }
     }
-    this.routes = next;
-    return new Set(next.keys());
+    for (const [i, route] of routes.entries()) {
+      const info = pools[i];
+      if (!info) continue;
+      try {
+        const built = await build(route.pool, route.kind, info.data, (a2, b2) => {
+          if (a2.equals(NATIVE_MINT) || b2.equals(NATIVE_MINT)) return null;
+          if (direct.has(a2.toBase58()) && !direct.has(b2.toBase58())) return a2;
+          if (direct.has(b2.toBase58()) && !direct.has(a2.toBase58())) return b2;
+          return null;
+        });
+        if (built && !via.has(built.target.toBase58())) via.set(built.target.toBase58(), built);
+      } catch {
+      }
+    }
+    this.routes = direct;
+    this.viaRoutes = via;
+    return /* @__PURE__ */ new Set([...direct.keys(), ...via.keys()]);
+  }
+  viaOf(target) {
+    return this.viaRoutes.get(target)?.input.toBase58() ?? null;
   }
   async programsOf(mints) {
     const infos = await this.connection.getMultipleAccountsInfo(mints, "confirmed");
@@ -151776,22 +151854,27 @@ var SolanaStreamChain = class {
       return info.owner;
     });
   }
-  async dammRoute(pool, data) {
+  /** A DAMM v2 pool as a route: `input` picks which of its two tokens a swap sells. */
+  async dammRoute(pool, data, input) {
     const swap = decodeDammV2SwapPool(data);
-    const target = swap.tokenAMint.equals(NATIVE_MINT) ? swap.tokenBMint : swap.tokenBMint.equals(NATIVE_MINT) ? swap.tokenAMint : null;
-    if (!target) return null;
+    const selling = input(swap.tokenAMint, swap.tokenBMint);
+    if (!selling) return null;
+    const target = selling.equals(swap.tokenAMint) ? swap.tokenBMint : swap.tokenAMint;
     const [programA, programB] = await this.programsOf([swap.tokenAMint, swap.tokenBMint]);
     const accounts = dammV2SwapAccounts(swap, programA, programB);
-    return { target, pool, kind: ROUTE_KIND.dammV2, accounts: async () => accounts };
+    return { target, input: selling, pool, kind: ROUTE_KIND.dammV2, accounts: async () => accounts };
   }
-  async dlmmRoute(pool, data) {
+  /** A DLMM pool as a route: `input` picks which of its two tokens a swap sells. */
+  async dlmmRoute(pool, data, input) {
     const pair = decodeLbPair(data);
-    const swapForY = pair.mintX.equals(NATIVE_MINT);
-    const target = swapForY ? pair.mintY : pair.mintY.equals(NATIVE_MINT) ? pair.mintX : null;
-    if (!target) return null;
+    const selling = input(pair.mintX, pair.mintY);
+    if (!selling) return null;
+    const swapForY = selling.equals(pair.mintX);
+    const target = swapForY ? pair.mintY : pair.mintX;
     const [programX, programY] = await this.programsOf([pair.mintX, pair.mintY]);
     return {
       target,
+      input: selling,
       pool,
       kind: ROUTE_KIND.dlmm,
       accounts: async () => {
@@ -151808,7 +151891,7 @@ var SolanaStreamChain = class {
   convertIx(route, accounts, amountIn, minimumOut) {
     return convertStreamIx({
       distributor: this.distributor.publicKey,
-      fromMint: NATIVE_MINT,
+      fromMint: route.input,
       toMint: route.target,
       pool: route.pool,
       kind: route.kind,
@@ -151838,20 +151921,32 @@ var SolanaStreamChain = class {
     return convertedOut(result.value.logs);
   }
   async probe(target) {
-    const route = this.routes.get(target);
-    if (!route) return null;
-    return this.simulate(route, await route.accounts(), PRICE_PROBE_LAMPORTS);
+    const direct = this.routes.get(target);
+    if (direct) return this.simulate(direct, await direct.accounts(), PRICE_PROBE_LAMPORTS);
+    const via = this.viaRoutes.get(target);
+    if (!via) return null;
+    if (via.kind === ROUTE_KIND.dlmm) return this.dlmmSpotOut(via, PRICE_PROBE_VIA);
+    return this.simulate(via, await via.accounts(), PRICE_PROBE_VIA);
+  }
+  /** What `amount` of a DLMM route's input buys at the pool's current price, fees and depth aside. */
+  async dlmmSpotOut(route, amount) {
+    const info = await this.connection.getAccountInfo(route.pool, "confirmed");
+    if (!info) return null;
+    const pair = decodeLbPair(info.data);
+    const price = priceOfBin(pair.activeId, pair.binStep);
+    if (!price) return null;
+    return route.input.equals(pair.mintX) ? amount * price >> 64n : (amount << 64n) / price;
   }
   /**
    * Sizes a swap to the pool: a small probe gives the pool's going rate, and the swap shrinks
    * until it moves the price no more than `maxImpactBps`. Its minimum is the simulated result
    * less `slippageBps`, so a sandwich can't take more than that.
    */
-  async prepareConversion(target, amountIn) {
-    const route = this.routes.get(target);
-    if (!route) return null;
+  async prepareConversion(target, amountIn, from = SOL_MINT) {
+    const route = from === SOL_MINT ? this.routes.get(target) : this.viaRoutes.get(target);
+    if (!route || !route.input.equals(new import_web363.PublicKey(from))) return null;
     const accounts = await route.accounts();
-    const min2 = this.settings.minConvertLamports;
+    const min2 = from === SOL_MINT ? this.settings.minConvertLamports : this.settings.minConvertVia ?? 1000000n;
     let amount = amountIn;
     const probe = amount < 1000000n ? amount : amount / 100n > 1000000n ? amount / 100n : 1000000n;
     const probeOut = await this.simulate(route, accounts, probe);
@@ -151881,7 +151976,16 @@ var SolanaStreamChain = class {
     tx.sign([this.distributor]);
     const signature = bs58Signature(tx.signatures[0]);
     this.signed.set(signature, { raw: tx.serialize(), blockhash: latest.blockhash });
-    return { target, amountIn: amount, expectedOut: out, minimumOut, impactBps: impact, signature, lastValidBlockHeight: latest.lastValidBlockHeight };
+    return {
+      target,
+      ...from === SOL_MINT ? {} : { from },
+      amountIn: amount,
+      expectedOut: out,
+      minimumOut,
+      impactBps: impact,
+      signature,
+      lastValidBlockHeight: latest.lastValidBlockHeight
+    };
   }
   async sendConversion(conversion) {
     const signed = this.signed.get(conversion.signature);
@@ -151904,7 +152008,7 @@ var SolanaStreamChain = class {
     if (status.err) return { status: "failed", reason: JSON.stringify(status.err) };
     const tx = await this.connection.getTransaction(flight.signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 });
     if (!tx?.meta) return { status: "pending" };
-    const out = boughtFrom(tx, findStreamVault(new import_web363.PublicKey(flight.target), this.programId)) ?? convertedOut(tx.meta.logMessages);
+    const out = boughtFrom(tx, findStreamVault(new import_web363.PublicKey(flight.buys ?? flight.target), this.programId)) ?? convertedOut(tx.meta.logMessages);
     if (out === null) return { status: "pending" };
     return { status: "landed", out, slot: status.slot };
   }
@@ -152346,6 +152450,7 @@ async function pushStreamPayouts(args) {
 var import_buffer15 = require("buffer");
 var DEFAULT_STREAM_SETTINGS = {
   minConvertLamports: 10000000n,
+  minConvertVia: 1000000n,
   maxSwapsPerTarget: 2,
   pendingGraceMs: 3 * 6e4,
   stallMs: 24 * 36e5,
@@ -152369,19 +152474,21 @@ function settle(book, outcome, log4) {
     log4("swap landed", { target: flight.target, amountIn: flight.amountIn, out: outcome.out.toString(), signature: flight.signature });
     return { ...applyConversion(book, outcome.out), seenSlot: Math.max(book.seenSlot, outcome.slot) };
   }
-  log4("swap did not land; its SOL waits for the next one", { target: flight.target, reason: outcome.status === "failed" ? outcome.reason : "" });
+  log4("swap did not land; what it would have spent waits for the next one", { target: flight.target, reason: outcome.status === "failed" ? outcome.reason : "" });
   return { ...book, inFlight: null };
 }
 async function runStreams(chain, store, weights, log4 = () => {
 }, settings = DEFAULT_STREAM_SETTINGS, now = Date.now()) {
-  const report = { posted: [], converted: [], queued: {}, skipped: [] };
+  const report = { posted: [], converted: [], queued: {}, queuedVia: {}, skipped: [] };
   let book = store.read();
   const fresh = () => chain.streams(book.seenSlot > 0 ? book.seenSlot : void 0);
   let streams = await fresh();
   const finish = () => {
     for (const [target, owed] of Object.entries(book.queue)) report.queued[target] = sumAmounts(Object.values(owed)).toString();
+    for (const [target, held] of Object.entries(book.via)) report.queuedVia[target] = { mint: held.mint, amount: viaWaiting(book, target).toString() };
     return report;
   };
+  const viaOf = (target) => chain.viaOf?.(target) ?? null;
   const pending = store.readPending();
   if (pending) {
     const onChain = streams.find((s) => s.mint === pending.mint);
@@ -152442,7 +152549,7 @@ async function runStreams(chain, store, weights, log4 = () => {
       if (s.mint === SOL_MINT || !inStep.has(s.mint)) continue;
       const current = book.streams[s.mint];
       if (!matches(current, s)) continue;
-      const credited = sumAmounts(Object.values(current.credits));
+      const credited = sumAmounts(Object.values(current.credits)) + viaHeld(book, s.mint);
       const arrived = s.spendable + s.released - s.allocated - credited;
       if (arrived < 0n) {
         report.skipped.push({ mint: s.mint, reason: "the stream holds less than was bought for stakers" });
@@ -152465,20 +152572,34 @@ async function runStreams(chain, store, weights, log4 = () => {
     const alwaysQueued = new Set(settings.alwaysQueued ?? []);
     let next = book;
     let direct = /* @__PURE__ */ new Map();
-    for (const target of Object.keys(book.queue)) {
+    for (const target of /* @__PURE__ */ new Set([...Object.keys(book.queue), ...Object.keys(book.via)])) {
       const since = book.waitingSince[target];
       const stalled = since !== void 0 && now - since >= settings.stallMs;
       if (routable.has(target) && !stalled) continue;
       const owed = toAmounts(book.queue[target]);
       const kept = new Map([...owed].filter(([owner]) => alwaysQueued.has(owner)));
       const paid = new Map([...owed].filter(([owner]) => !alwaysQueued.has(owner)));
-      if (paid.size === 0) continue;
+      const held = next.via[target];
+      const heldOwed = toAmounts(held?.owed);
+      const heldKept = new Map([...heldOwed].filter(([owner]) => alwaysQueued.has(owner)));
+      const heldPaid = new Map([...heldOwed].filter(([owner]) => !alwaysQueued.has(owner)));
+      if (paid.size === 0 && heldPaid.size === 0) continue;
       direct = mergeAmounts(direct, paid);
       const queue = { ...next.queue };
       if (kept.size) queue[target] = toRecord(kept);
       else delete queue[target];
       next = { ...next, queue };
-      log4(stalled ? "a payout token could not be bought for too long: paying the SOL waiting for it as SOL" : "no pool for a payout token any more: paying its stakers SOL", { target });
+      if (held && heldPaid.size) {
+        const stream = next.streams[held.mint];
+        if (stream) {
+          const via = { ...next.via };
+          if (heldKept.size) via[target] = { mint: held.mint, owed: toRecord(heldKept) };
+          else delete via[target];
+          const credits = toRecord(mergeAmounts(toAmounts(stream.credits), heldPaid));
+          next = { ...next, via, streams: { ...next.streams, [held.mint]: { ...stream, credits } } };
+        }
+      }
+      log4(stalled ? "a payout token could not be bought for too long: paying what waits for it as SOL, or in the token bought on the way" : "no pool for a payout token any more: paying its stakers SOL, or the token bought on the way", { target });
     }
     const available = sol2.spendable + sol2.released - sol2.allocated - queuedTotal(book);
     if (available < 0n) {
@@ -152509,27 +152630,32 @@ async function runStreams(chain, store, weights, log4 = () => {
     book = recordPrice(book, target, out, now, settings.priceWindowMs);
   }
   if (priced.size) store.save(book);
-  for (const target of inStep.has(SOL_MINT) ? Object.keys(book.queue) : []) {
-    if (!inStep.has(target)) continue;
-    if (sumAmounts(Object.values(book.queue[target] ?? {})) < settings.minConvertLamports) continue;
-    const out = priced.get(target);
-    const verdict = out === void 0 ? "its price could not be read" : priceVerdict(book.prices[target] ?? [], out, now, settings);
+  const buy = async (target, from, buys) => {
+    const fromSol = from === SOL_MINT;
+    const waitingFor = () => fromSol ? sumAmounts(Object.values(book.queue[target] ?? {})) : viaWaiting(book, target);
+    const least = fromSol ? settings.minConvertLamports : settings.minConvertVia ?? 1000000n;
+    if (waitingFor() < least) return true;
+    const priceOf = fromSol ? buys : target;
+    const out = priced.get(priceOf);
+    const verdict = out === void 0 ? "its price could not be read" : priceVerdict(book.prices[priceOf] ?? [], out, now, settings);
     if (verdict) {
       report.skipped.push({ mint: target, reason: `not buying yet: ${verdict}` });
       log4("not buying a payout token yet", { target, reason: verdict });
-      continue;
+      return true;
     }
     for (let i = 0; i < settings.maxSwapsPerTarget; i++) {
-      const waiting = sumAmounts(Object.values(book.queue[target] ?? {}));
-      if (waiting < settings.minConvertLamports) break;
-      const conversion = await chain.prepareConversion(target, waiting);
+      const waiting = waitingFor();
+      if (waiting < least) break;
+      const conversion = fromSol ? await chain.prepareConversion(buys, waiting) : await chain.prepareConversion(target, waiting, from);
       if (!conversion || conversion.amountIn <= 0n) break;
-      if (conversion.amountIn > waiting) throw new Error(`A swap into ${target} would spend more than is waiting`);
-      const spends = planSpends(book, target, conversion.amountIn);
+      if (conversion.amountIn > waiting) throw new Error(`A swap into ${buys} would spend more than is waiting`);
+      const spends = fromSol ? planSpends(book, target, conversion.amountIn) : planViaSpends(book, target, conversion.amountIn);
       book = {
         ...book,
         inFlight: {
           target,
+          ...fromSol ? {} : { from },
+          ...buys === target ? {} : { buys },
           amountIn: conversion.amountIn.toString(),
           spends: toRecord(spends),
           signature: conversion.signature,
@@ -152541,19 +152667,31 @@ async function runStreams(chain, store, weights, log4 = () => {
       const outcome = await chain.outcome(book.inFlight);
       if (outcome.status === "pending") {
         report.skipped.push({ mint: target, reason: "a swap is still landing" });
-        return finish();
+        return false;
       }
       book = ageQueues(settle(book, outcome, log4), now);
       store.save(book);
       if (outcome.status !== "landed") break;
       report.converted.push({
         target,
+        ...fromSol ? {} : { from },
+        ...buys === target ? {} : { buys },
         amountIn: conversion.amountIn.toString(),
         out: outcome.out.toString(),
         impactBps: conversion.impactBps,
         signature: conversion.signature
       });
     }
+    return true;
+  };
+  for (const target of inStep.has(SOL_MINT) ? Object.keys(book.queue) : []) {
+    const buys = viaOf(target) ?? target;
+    if (!inStep.has(target) || !inStep.has(buys)) continue;
+    if (!await buy(target, SOL_MINT, buys)) return finish();
+  }
+  for (const [target, held] of Object.entries(book.via)) {
+    if (viaOf(target) !== held.mint || !inStep.has(target) || !inStep.has(held.mint)) continue;
+    if (!await buy(target, held.mint, target)) return finish();
   }
   if (report.converted.length) await postTokenStreams();
   return finish();
@@ -152654,7 +152792,8 @@ var V2Bot = class {
         this.log("streams run finished", {
           posted: this.status.streams.posted.length,
           converted: this.status.streams.converted.length,
-          queued: this.status.streams.queued
+          queued: this.status.streams.queued,
+          queuedVia: this.status.streams.queuedVia
         });
       }
     } catch (error) {
@@ -152776,7 +152915,11 @@ var V2Bot = class {
           proof: position === void 0 ? [] : tree.proofs[position].map((node) => node.toString("hex"))
         };
       });
-      const waiting = Object.entries(book.queue).filter(([, owed]) => owed[owner]).map(([target, owed]) => ({ target, lamports: owed[owner] }));
+      const waiting = [
+        ...Object.entries(book.queue).filter(([, owed]) => owed[owner]).map(([target, owed]) => ({ target, lamports: owed[owner] })),
+        // Bought on the way to a token SOL can't buy directly, waiting for the second swap.
+        ...Object.entries(book.via ?? {}).filter(([, held]) => held.owed[owner]).map(([target, held]) => ({ target, via: held.mint, amount: held.owed[owner] }))
+      ];
       return { status: 200, body: { owner, streams, waiting } };
     }
     return { status: 404, body: { error: "Not found" } };
